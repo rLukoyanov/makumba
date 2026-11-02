@@ -7,6 +7,10 @@ TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite sprite = TFT_eSprite(&tft);
 bool useSprite = false;
 
+const int PHOTORESISTOR_PIN = 27;
+constexpr bool kDarkWhenLow = false;
+constexpr uint32_t kLightDebounceMs = 900;
+
 constexpr int kScreenW = 240;
 constexpr int kScreenH = 240;
 constexpr int kCenterX = kScreenW / 2;
@@ -15,7 +19,7 @@ constexpr int kEyeOffsetX = 55;
 constexpr int kMouthBaseY = 175;
 constexpr bool kInvertDisplay = true;
 
-constexpr int kTargetFps = 60;
+constexpr int kTargetFps = 120;
 const int fpsInterval = 1000 / kTargetFps;
 unsigned long nextEmotionAt = 0;
 unsigned long exprStartedAt = 0;
@@ -26,6 +30,41 @@ constexpr int kRecentN = 8;
 face::Expr recentExpr[kRecentN] = {};
 int recentCount = 0;
 int recentPos = 0;
+
+void pushRecent(face::Expr e);
+
+bool lightRawDark = false;
+bool lightStableDark = false;
+unsigned long lightLastEdgeAt = 0;
+
+void setExpression(face::Expr e, uint32_t now)
+{
+  currentExpr = e;
+  pushRecent(currentExpr);
+  exprStartedAt = now;
+  const face::Expression &nx = face::expression(currentExpr);
+  nextEmotionAt = now + (nx.hold_ms ? nx.hold_ms : (uint16_t)(1800 + random(2200)));
+}
+
+bool updateLightState(uint32_t now)
+{
+  const int level = digitalRead(PHOTORESISTOR_PIN);
+  const bool rawDark = kDarkWhenLow ? (level == LOW) : (level == HIGH);
+
+  if (rawDark != lightRawDark)
+  {
+    lightRawDark = rawDark;
+    lightLastEdgeAt = now;
+  }
+
+  if (rawDark != lightStableDark && (now - lightLastEdgeAt) >= kLightDebounceMs)
+  {
+    lightStableDark = rawDark;
+    return true;
+  }
+
+  return false;
+}
 
 struct CatWeight
 {
@@ -156,12 +195,7 @@ void advanceBehavior(uint32_t now)
   if (next == currentExpr)
     next = pickAny(false);
 
-  currentExpr = next;
-  pushRecent(currentExpr);
-  exprStartedAt = now;
-
-  const face::Expression &nx = face::expression(currentExpr);
-  nextEmotionAt = now + (nx.hold_ms ? nx.hold_ms : (uint16_t)(1800 + random(2200)));
+  setExpression(next, now);
 }
 
 float triangleWave(float x)
@@ -843,6 +877,12 @@ void setup()
 {
   randomSeed((uint32_t)micros());
 
+  pinMode(PHOTORESISTOR_PIN, INPUT);
+  const int level = digitalRead(PHOTORESISTOR_PIN);
+  lightRawDark = kDarkWhenLow ? (level == LOW) : (level == HIGH);
+  lightStableDark = lightRawDark;
+  lightLastEdgeAt = millis();
+
   tft.init();
   tft.setRotation(0);
   tft.invertDisplay(kInvertDisplay);
@@ -862,17 +902,42 @@ void setup()
     tft.drawString("Sprite fallback", 64, 222, 2);
   }
 
-  currentExpr = face::Expr::neutral;
-  pushRecent(currentExpr);
-  exprStartedAt = millis();
-  nextEmotionAt = exprStartedAt + 2400;
+  const uint32_t now = millis();
+  setExpression(lightStableDark ? face::Expr::sleepy : face::Expr::neutral, now);
 }
 
 void loop()
 {
   unsigned long currentTime = millis();
   mouthWave += 0.08;
-  advanceBehavior(currentTime);
+
+  const bool changed = updateLightState(currentTime);
+  if (changed)
+  {
+    if (lightStableDark)
+    {
+      setExpression(face::Expr::sleepy, currentTime);
+    }
+    else
+    {
+      setExpression(face::Expr::waking, currentTime);
+    }
+  }
+
+  if (lightStableDark)
+  {
+    if (currentTime >= nextEmotionAt)
+    {
+      if (currentExpr == face::Expr::sleepy)
+        setExpression(face::Expr::sleeping, currentTime);
+      else
+        setExpression(face::Expr::sleeping, currentTime);
+    }
+  }
+  else
+  {
+    advanceBehavior(currentTime);
+  }
 
   const face::Expression &expr = face::expression(currentExpr);
 
